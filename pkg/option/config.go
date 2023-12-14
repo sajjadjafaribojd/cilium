@@ -1143,6 +1143,10 @@ const (
 
 	// EnableNonDefaultDenyPolicies allows policies to define whether they are operating in default-deny mode
 	EnableNonDefaultDenyPolicies = "enable-non-default-deny-policies"
+
+	// EnableEndpointLockdownOnPolicyOverflow enables endpoint lockdown when an endpoint's
+	// policy map overflows.
+	EnableEndpointLockdownOnPolicyOverflow = "enable-endpoint-lockdown-on-policy-overflow"
 )
 
 // Default string arguments
@@ -2253,6 +2257,10 @@ type DaemonConfig struct {
 
 	// EnableSourceIPVerification enables the source ip validation of connection from endpoints to endpoints
 	EnableSourceIPVerification bool
+
+	// EnableEndpointLockdownOnPolicyOverflow enables endpoint lockdown when an endpoint's
+	// policy map overflows.
+	EnableEndpointLockdownOnPolicyOverflow bool
 }
 
 var (
@@ -3287,6 +3295,8 @@ func (c *DaemonConfig) Populate(vp *viper.Viper) {
 	c.PolicyCIDRMatchMode = vp.GetStringSlice(PolicyCIDRMatchMode)
 	c.EnableNodeSelectorLabels = vp.GetBool(EnableNodeSelectorLabels)
 	c.NodeLabels = vp.GetStringSlice(NodeLabels)
+	// Support failure-mode for policy map overflow
+	c.EnableEndpointLockdownOnPolicyOverflow = vp.GetBool(EnableEndpointLockdownOnPolicyOverflow)
 
 	c.EnableCiliumNetworkPolicy = vp.GetBool(EnableCiliumNetworkPolicy)
 	c.EnableCiliumClusterwideNetworkPolicy = vp.GetBool(EnableCiliumClusterwideNetworkPolicy)
