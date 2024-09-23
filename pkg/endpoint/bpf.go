@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/google/renameio/v2"
@@ -37,6 +38,7 @@ import (
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	policyapi "github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/revert"
 	"github.com/cilium/cilium/pkg/time"
@@ -54,10 +56,32 @@ const (
 )
 
 var (
+	// ErrPolicyEntryMaxExceeded indicates that the BPF map backing the
+	// endpoint policy is too full to accommodate a given set of changes.
+	ErrPolicyEntryMaxExceeded = errors.New("policy map max entries limit exceeded")
+
+	// ErrComingOutOfLockdown indicates that the BPF map backing the
+	// endpoint policy is too full to accommodate a given set of changes.
+	ErrComingOutOfLockdown = errors.New("lockdown is no longer needed, but a full policy recomputation is needed")
+
 	handleNoHostInterfaceOnce sync.Once
 
 	syncPolicymapControllerGroup = controller.NewGroup("sync-policymap")
+
+	// allTrafficKeys specifies all of the policy Keys necessary to cover
+	// all (ingress and egress) network traffic.
+	allTrafficKeys []policy.Key
 )
+
+func init() {
+	for _, proto := range policyapi.SupportedProtocols() {
+		p := u8proto.ProtoIDs[strings.ToLower(string(proto))]
+		allTrafficKeys = append(allTrafficKeys,
+			policy.IngressKey().WithPortProtoPrefix(p, 0, 0),
+			policy.EgressKey().WithPortProtoPrefix(p, 0, 0),
+		)
+	}
+}
 
 // policyMapPath returns the path to the policy map of endpoint.
 func (e *Endpoint) policyMapPath() string {
@@ -370,7 +394,6 @@ func (e *Endpoint) regenerateBPF(regenContext *regenerationContext) (revnum uint
 	defer datapathRegenCtxt.completionCancel()
 
 	err = e.runPreCompilationSteps(regenContext)
-
 	// Keep track of the side-effects of the regeneration that need to be
 	// reverted in case of failure.
 	// Also keep track of the regeneration finalization code that can't be
@@ -480,7 +503,9 @@ func (e *Endpoint) regenerateBPF(regenContext *regenerationContext) (revnum uint
 	// policy map with the new proxy ports.
 	stats.mapSync.Start()
 	// Nothing to do if the desired policy is already fully realized.
-	if e.realizedPolicy != e.desiredPolicy {
+	// If the endpoint is in lockdown then we should not sync desiredPolicy
+	// to realizedPolicy.
+	if e.realizedPolicy != e.desiredPolicy && !e.lockdown {
 		if e.realizedPolicy.Empty() {
 			// Realized policy is empty, sync with the dump from the datapath
 			var policyMapDump policy.MapStateMap
@@ -636,8 +661,8 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (pr
 		// have a chance to be ready when new traffic is redirected to them.  Note that it
 		// is possible for further incremental changes to be applied before and after the
 		// bpf policy maps have been synchronized for the new policy.
-		err = e.applyPolicyMapChanges(regenContext, e.desiredPolicy != e.realizedPolicy)
-		if err != nil {
+		err = e.applyPolicyMapChangesLocked(regenContext, e.desiredPolicy != e.realizedPolicy)
+		if err != nil && !errors.Is(err, ErrPolicyEntryMaxExceeded) {
 			return err
 		}
 	}
@@ -870,11 +895,23 @@ type policyMapPressureUpdater interface {
 }
 
 func (e *Endpoint) updatePolicyMapPressureMetric() {
-	value := float64(e.realizedPolicy.Len()) / float64(e.policyMap.MaxEntries())
+	value := float64(e.desiredPolicy.Len()) / float64(e.policyMap.MaxEntries())
 	e.PolicyMapPressureUpdater.Update(PolicyMapPressureEvent{
 		Value:      value,
 		EndpointID: e.ID,
 	})
+}
+
+func (e *Endpoint) deletePolicyKeys(deletes, adds policy.Keys) int {
+	var errors int
+	for k := range deletes {
+		if _, ok := adds[k]; !ok {
+			if !e.deletePolicyKey(k) {
+				errors++
+			}
+		}
+	}
+	return errors
 }
 
 func (e *Endpoint) deletePolicyKey(keyToDelete policy.Key) bool {
@@ -902,6 +939,26 @@ func (e *Endpoint) deletePolicyKey(keyToDelete policy.Key) bool {
 	}, "deletePolicyKey")
 
 	return true
+}
+
+func (e *Endpoint) addPolicyKeys(adds policy.Keys) int {
+	var errors int
+	// Add policy map entries before deleting to avoid transient drops
+	for keyToAdd := range adds {
+		entry, exists := e.desiredPolicy.Get(keyToAdd)
+		if !exists {
+			e.getLogger().WithFields(logrus.Fields{
+				logfields.AddedPolicyID: keyToAdd,
+			}).Warn("Tried adding policy map key not in policy")
+			continue
+		}
+
+		if !e.addPolicyKey(keyToAdd, entry) {
+			errors++
+		}
+
+	}
+	return errors
 }
 
 func (e *Endpoint) addPolicyKey(keyToAdd policy.Key, entry policy.MapStateEntry) bool {
@@ -943,18 +1000,18 @@ func (e *Endpoint) ApplyPolicyMapChanges(proxyWaitGroup *completion.WaitGroup) e
 
 	e.PolicyDebug(nil, "ApplyPolicyMapChanges")
 
-	return e.applyPolicyMapChanges(&regenerationContext{
+	return e.applyPolicyMapChangesLocked(&regenerationContext{
 		datapathRegenerationContext: &datapathRegenerationContext{
 			proxyWaitGroup: proxyWaitGroup,
 		},
 	}, false)
 }
 
-// applyPolicyMapChanges applies any incremental policy map changes
-// collected on the desired policy.
-// Endpoint's Envoy NetworkPolicy is also updated if needed.
-// Endpoint must be locked
-func (e *Endpoint) applyPolicyMapChanges(regenContext *regenerationContext, hasNewPolicy bool) error {
+// applyPolicyMapChangesLocked applies any incremental policy map changes
+// collected on the desired policy. Endpoint's Envoy NetworkPolicy is also
+// updated if needed. Endpoint must be locked. It returns one special error
+// that must be considered, "ErrPolicyEntryMaxExceeded".
+func (e *Endpoint) applyPolicyMapChangesLocked(regenContext *regenerationContext, hasNewPolicy bool) error {
 	e.PolicyDebug(nil, "applyPolicyMapChanges")
 
 	// Always update Envoy if policy has changed
@@ -969,6 +1026,18 @@ func (e *Endpoint) applyPolicyMapChanges(regenContext *regenerationContext, hasN
 	// returns changes that need to be applied to the Endpoint's bpf policy map.
 	closer, changes := e.desiredPolicy.ConsumeMapChanges()
 	defer closer()
+	// If the desiredPolicy will be larger than the BPF maximum after
+	// the changes we need to reset the consumed changes and either
+	// lockdown or return an inevitable error (which would happen on
+	// insertion if we proceed).
+	if e.shouldLockdownLocked(changes.Size()) {
+		return e.startLockdownLocked()
+	}
+	if e.lockdown {
+		e.forcePolicyCompute = true
+		e.lockdown = false
+		return ErrComingOutOfLockdown
+	}
 
 	hasEnvoyRedirect := e.desiredPolicy.L4Policy.HasEnvoyRedirect()
 	if !changes.Empty() {
@@ -1047,37 +1116,96 @@ func (e *Endpoint) applyPolicyMapChanges(regenContext *regenerationContext, hasN
 		return nil
 	}
 
-	// Add policy map entries before deleting to avoid transient drops
+	// Add policy map entries before deleting to avoid transient drops. If there
+	// isn't enough space to add all the entries before deleting some, then delete
+	// first.
 	errors := 0
-	for keyToAdd := range changes.Adds {
-		entry, exists := e.desiredPolicy.Get(keyToAdd)
-		if !exists {
-			e.getLogger().WithFields(logrus.Fields{
-				logfields.AddedPolicyID: keyToAdd,
-			}).Warn("Tried adding policy map key not in policy")
-			continue
-		}
-
-		if !e.addPolicyKey(keyToAdd, entry) {
-			errors++
-		}
-	}
-
-	for keyToDelete := range changes.Deletes {
-		if !e.deletePolicyKey(keyToDelete) {
-			errors++
-		}
+	if e.realizedPolicy.Len()+len(changes.Adds) <= int(e.policyMap.MaxEntries()) {
+		errors += e.addPolicyKeys(changes.Adds)
+		errors += e.deletePolicyKeys(changes.Deletes, changes.Adds)
+	} else {
+		errors += e.deletePolicyKeys(changes.Deletes, changes.Adds)
+		errors += e.addPolicyKeys(changes.Adds)
 	}
 
 	if errors > 0 {
 		return fmt.Errorf("updating bpf policy maps failed")
 	}
-	if len(changes.Adds)+len(changes.Deletes) > 0 {
+	if len(changes.Adds) > 0 || len(changes.Deletes) > 0 {
 		e.getLogger().WithFields(logrus.Fields{
 			logfields.AddedPolicyID:   changes.Adds,
 			logfields.DeletedPolicyID: changes.Deletes,
 		}).Debug("Applied policy map updates due to identity changes")
 	}
+	return nil
+}
+
+// shouldLockdownLockdown returns true if the desiredPolicy, after changes,
+// will be larger than policymap.MaxEntries. The Endpoint must be locked.
+func (e *Endpoint) shouldLockdownLocked(changeSize int) bool {
+	return e.desiredPolicy.Len()+changeSize > policymap.MaxEntries
+}
+
+// startLockdownLocked initiates an endpoint lockdown, and returns an
+// error if it fails. The Endpoint must be locked.
+func (e *Endpoint) startLockdownLocked() error {
+	// We only need to go through the mechanics of
+	// lockdown once.
+	if !e.lockdown {
+		// Avoid an insertion error further down and return an
+		// error now.
+		if !option.Config.EnableEndpointLockdownOnPolicyOverflow {
+			return ErrPolicyEntryMaxExceeded
+		}
+
+		e.getLogger().WithFields(logrus.Fields{
+			logfields.EndpointID: e.ID,
+		}).Warnf("The policy map exceeds the max entries limit, %s is enabled, locking the endpoint down.",
+			option.EnableEndpointLockdownOnPolicyOverflow)
+
+		if err := e.endpointPolicyLockdown(); err != nil {
+			e.getLogger().WithFields(logrus.Fields{
+				logfields.EndpointID: e.ID,
+			}).WithError(err).Error("Failed to lockdown endpoint:" +
+				"Consider quarantining or shutting down this node.")
+			return err
+		}
+		e.lockdown = true
+	}
+	return ErrPolicyEntryMaxExceeded
+}
+
+// endpointPolicyLockdown puts the endpoint policy map into a lockdown
+// mode. A new bpf policy map is populated with deny all traffic entries.
+// The old map is unpinned, and the new map is pinned.
+func (e *Endpoint) endpointPolicyLockdown() error {
+	policyMapPath := e.policyMapPath()
+	pM, err := policymap.CreateUnpinned(policyMapPath)
+	if err != nil {
+		return fmt.Errorf("could not create bpf map %q: %w", policyMapPath, err)
+	}
+	// 1. Unpin the old policy.
+	// 2. Set the realizedPolicy field to a new EndpointPolicy,
+	//    so that we are not modifying desiredPolicy.
+	// 3. Add deny all keys to the new realizedPolicy.
+	// 4. Pin the new bpf map.
+	// 5. Update the pressure metric, because other code paths
+	//    to updating it are now disabled in lockdown mode.
+	if err := e.policyMap.Unpin(); err != nil {
+		return fmt.Errorf("failed to unpin previous map: %w", err)
+	}
+	e.policyMap = pM
+	e.realizedPolicy = policy.NewEndpointPolicy(e.policyGetter.GetPolicyRepository())
+	for _, k := range allTrafficKeys {
+		policymapKey := policymap.NewKey(k.TrafficDirection(), k.Identity, k.Nexthdr, k.DestPort, k.PortPrefixLen())
+		if err := pM.DenyKey(policymapKey); err != nil {
+			return fmt.Errorf("failed to add deny all policy (%v): %w", policymapKey, err)
+		}
+	}
+	if err = e.policyMap.Pin(e.policyMapPath()); err != nil {
+		return fmt.Errorf("failed to pin new map to %q: %w", e.policyMapPath(), err)
+	}
+	e.updatePolicyMapPressureMetric()
 	return nil
 }
 
@@ -1087,6 +1215,15 @@ func (e *Endpoint) applyPolicyMapChanges(regenContext *regenerationContext, hasN
 // Only called when desired and realized policies are not the same.
 func (e *Endpoint) syncPolicyMap() error {
 	addErrors, deleteErrors := 0, 0
+
+	if e.shouldLockdownLocked(0) {
+		return e.startLockdownLocked()
+	}
+	if e.lockdown {
+		e.forcePolicyCompute = true
+		e.lockdown = false
+		return ErrComingOutOfLockdown
+	}
 
 	// Add policy map entries before deleting to avoid transient drops
 	for k, v := range e.desiredPolicy.Updated(e.realizedPolicy) {
@@ -1125,6 +1262,17 @@ func (e *Endpoint) syncPolicyMap() error {
 // and desired policy state.
 func (e *Endpoint) syncPolicyMapWith(realized policy.MapStateMap, withDiffs bool) (diffCount int, diffs []policy.MapChange, err error) {
 	addErrors, deleteErrors := 0, 0
+
+	if e.shouldLockdownLocked(0) {
+		err = e.startLockdownLocked()
+		return
+	}
+	if e.lockdown {
+		e.forcePolicyCompute = true
+		e.lockdown = false
+		err = ErrComingOutOfLockdown
+		return
+	}
 
 	// Add policy map entries before deleting to avoid transient drops
 	for k, v := range e.desiredPolicy.UpdatedMap(realized) {
