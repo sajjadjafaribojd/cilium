@@ -42,7 +42,8 @@ type cecManager struct {
 	backendSyncer  *envoyServiceBackendSyncer
 	resourceParser *cecResourceParser
 
-	envoyConfigTimeout time.Duration
+	envoyConfigTimeout   time.Duration
+	maxConcurrentRetries uint32
 
 	services  resource.Resource[*slim_corev1.Service]
 	endpoints resource.Resource[*k8s.Endpoints]
@@ -55,19 +56,21 @@ func newCiliumEnvoyConfigManager(logger logrus.FieldLogger,
 	backendSyncer *envoyServiceBackendSyncer,
 	resourceParser *cecResourceParser,
 	envoyConfigTimeout time.Duration,
+	maxConcurrentRetries uint32,
 	services resource.Resource[*slim_corev1.Service],
 	endpoints resource.Resource[*k8s.Endpoints],
 ) *cecManager {
 	return &cecManager{
-		logger:             logger,
-		policyUpdater:      policyUpdater,
-		serviceManager:     serviceManager,
-		xdsServer:          xdsServer,
-		backendSyncer:      backendSyncer,
-		resourceParser:     resourceParser,
-		envoyConfigTimeout: envoyConfigTimeout,
-		services:           services,
-		endpoints:          endpoints,
+		logger:               logger,
+		policyUpdater:        policyUpdater,
+		serviceManager:       serviceManager,
+		xdsServer:            xdsServer,
+		backendSyncer:        backendSyncer,
+		resourceParser:       resourceParser,
+		envoyConfigTimeout:   envoyConfigTimeout,
+		maxConcurrentRetries: maxConcurrentRetries,
+		services:             services,
+		endpoints:            endpoints,
 	}
 }
 
