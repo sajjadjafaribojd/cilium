@@ -136,6 +136,10 @@ ifneq ($(wildcard $(dir $(lastword $(MAKEFILE_LIST)))/images/cilium/Dockerfile),
     GO_BUILD_LDFLAGS += -X "github.com/cilium/cilium/pkg/envoy.requiredEnvoyVersionSHA=$(CILIUM_ENVOY_SHA)"
 endif
 
+ifneq ($(BOOTID_OVERRIDE),)
+    GO_BUILD_LDFLAGS += -X "github.com/cilium/cilium/pkg/node.bootIDFilePath=/proc/sys/kernel/random/uuid"
+endif
+
 # Use git only if in a Git repo, otherwise find the files from the file system
 BPF_SRCFILES_IGNORE = bpf/.gitignore
 ifneq ($(wildcard $(dir $(lastword $(MAKEFILE_LIST)))/.git/HEAD),)
