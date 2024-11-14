@@ -164,7 +164,7 @@ jobs:
         id: cilium-config
         uses: ./.github/actions/cilium-config
         with:
-          image-tag: ${{ steps.vars.outputs.sha }}
+          image-tag: ${{ steps.vars.outputs.sha }}-bootid-override
           chart-dir: './untrusted/install/kubernetes/cilium'
           tunnel: ${{ matrix.tunnel }}
           devices: ${{ matrix.devices }}
