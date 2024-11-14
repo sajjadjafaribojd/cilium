@@ -1974,6 +1974,9 @@
         "healthPort": {
           "type": "integer"
         },
+        "httpRetryCount": {
+          "type": "integer"
+        },
         "idleTimeoutDurationSeconds": {
           "type": "integer"
         },
