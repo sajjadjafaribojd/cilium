@@ -33,6 +33,7 @@ focus:
 - "f19-update"
 - "f20-kafka"
 - "f21-datapath-misc-3"
+- "f22-bandwidth-qos"
 include:
   ###
   # K8sAgentChaosTest Connectivity demo application Endpoint can still connect while Cilium is not running
@@ -214,6 +215,11 @@ include:
   # K8sSpecificMACAddressTests Check whether the pod is created Checks the pod's mac address
   - focus: "f20-kafka"
     cliFocus: "K8sKafkaPolicyTest|K8sSpecificMACAddressTests"
+
+  ###
+  # K8sDatapathQosTest Checks Bandwidth QoS Classes High to Low Ratio
+  - focus: "f22-bandwidth-qos"
+    cliFocus: "K8sDatapathQosTest"
 
 exclude:
   # The bandwidth test is disabled and hubble tests are not meant
