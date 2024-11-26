@@ -178,8 +178,8 @@ l3_csum_replace(const struct xdp_md *ctx, __u64 off, const __u32 from,
 		       [offmax]"i"(__CTX_OFF_MAX), [errno]"i"(-EINVAL)
 		     : "r1", "r2");
 	if (!ret)
-		from ? __csum_replace_by_4(sum, from, to) :
-		       __csum_replace_by_diff(sum, to);
+		from ? __csum_replace_by_4(sum, (__u32)from, (__u32)to) :
+		       __csum_replace_by_diff(sum, (__u32)to);
 	return ret;
 }
 
@@ -386,7 +386,7 @@ ctx_full_len(const struct xdp_md *ctx)
 static __always_inline __maybe_unused __u32
 ctx_wire_len(const struct xdp_md *ctx)
 {
-	return ctx_full_len(ctx);
+	return (__u32)ctx_full_len(ctx);
 }
 
 struct {
