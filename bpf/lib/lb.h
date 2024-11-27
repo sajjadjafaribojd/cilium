@@ -732,16 +732,24 @@ lb6_select_backend_id_maglev(struct __ctx_buff *ctx __maybe_unused,
 #endif  /* defined(LB_SELECTION_PER_SERVICE) || LB_SELECTION == LB_SELECTION_RANDOM */
 
 #ifdef LB_SELECTION_PER_SERVICE
+static __always_inline __u32 lb6_algorithm(const struct lb6_service *svc)
+{
+	return svc->affinity_timeout >> LB_ALGORITHM_SHIFT;
+}
+
 static __always_inline __u32
-lb6_select_backend_id(struct __ctx_buff *ctx,
-		      struct lb6_key *key,
-		      const struct ipv6_ct_tuple *tuple __maybe_unused,
+lb6_select_backend_id(struct __ctx_buff *ctx, struct lb6_key *key,
+		      const struct ipv6_ct_tuple *tuple,
 		      const struct lb6_service *svc)
 {
-	if (svc->lb_algorithm == LB_SELECTION_MAGLEV)
+	switch (lb6_algorithm(svc)) {
+	case LB_SELECTION_MAGLEV:
 		return lb6_select_backend_id_maglev(ctx, key, tuple, svc);
-
-	return lb6_select_backend_id_random(ctx, key, tuple, svc);
+	case LB_SELECTION_RANDOM:
+		return lb6_select_backend_id_random(ctx, key, tuple, svc);
+	default:
+		return 0;
+	}
 }
 #elif LB_SELECTION == LB_SELECTION_RANDOM
 # define lb6_select_backend_id	lb6_select_backend_id_random
@@ -1436,16 +1444,24 @@ lb4_select_backend_id_maglev(struct __ctx_buff *ctx __maybe_unused,
 #endif /* LB_SELECTION_PER_SERVICE || LB_SELECTION == LB_SELECTION_MAGLEV */
 
 #ifdef LB_SELECTION_PER_SERVICE
+static __always_inline __u32 lb4_algorithm(const struct lb4_service *svc)
+{
+	return svc->affinity_timeout >> LB_ALGORITHM_SHIFT;
+}
+
 static __always_inline __u32
-lb4_select_backend_id(struct __ctx_buff *ctx,
-		      struct lb4_key *key,
-		      const struct ipv4_ct_tuple *tuple __maybe_unused,
+lb4_select_backend_id(struct __ctx_buff *ctx, struct lb4_key *key,
+		      const struct ipv4_ct_tuple *tuple,
 		      const struct lb4_service *svc)
 {
-	if (svc->lb_algorithm == LB_SELECTION_MAGLEV)
+	switch (lb4_algorithm(svc)) {
+	case LB_SELECTION_MAGLEV:
 		return lb4_select_backend_id_maglev(ctx, key, tuple, svc);
-
-	return lb4_select_backend_id_random(ctx, key, tuple, svc);
+	case LB_SELECTION_RANDOM:
+		return lb4_select_backend_id_random(ctx, key, tuple, svc);
+	default:
+		return 0;
+	}
 }
 #elif LB_SELECTION == LB_SELECTION_RANDOM
 # define lb4_select_backend_id	lb4_select_backend_id_random
