@@ -5,9 +5,10 @@ on:
     - cron: '39 0 * * *'
 
 # For testing uncomment following lines:
-#  push:
-#    branches:
-#      - your_branch_name
+# TODO(hmalla): Remove this line before merging
+  push:
+    branches:
+      - hmalla/bw_prio
 
 permissions:
   # To be able to access the repository with actions/checkout
@@ -130,14 +131,15 @@ jobs:
 
       - name: Deploy cluster
         id: deploy-cluster
-        uses: cilium/scale-tests-action/create-cluster@d3ecfd83003f3e9c98ba125ca14933401d44918f # main
+        uses: cilium/scale-tests-action/create-cluster@fc474e2230b5d7884f364bb1acdea7e8966cd00e # main
         timeout-minutes: 30
         with:
           cluster_name: ${{ steps.vars.outputs.cluster_name }}
           control_plane_size: n2-standard-4
           control_plane_count: 1
           node_size: e2-standard-8
-          node_count: 1
+          node_count: 2
+          image: "ubuntu-os-cloud/ubuntu-2404-noble-amd64-v20241115"
           kops_state: ${{ secrets.GCP_PERF_KOPS_STATE_STORE }}
           project_id: ${{ secrets.GCP_PERF_PROJECT_ID }}
 
@@ -179,6 +181,11 @@ jobs:
         run: |
           cilium status --wait
 
+      - name: Run Network QoS Tests
+        id: run-net-qos
+        run: |
+          kubectl get nodes -o wide && kubectl label nodes -l node-role.kubernetes.io/node perf-test=true && cilium connectivity perf --node-selector perf-test=true --net-qos
+
       - name: Run CL2
         id: run-cl2
         working-directory: ./perf-tests/clusterloader2
@@ -205,7 +212,7 @@ jobs:
             2>&1 | tee cl2-output.txt
 
       - name: Get sysdump
-        if: ${{ always() && steps.run-cl2.outcome != 'skipped' }}
+        if: ${{ always() && (steps.run-cl2.outcome != 'skipped' || steps.run-net-qos.outcome != 'skipped') }}
         run: |
           cilium status
           cilium sysdump --output-filename cilium-sysdump-final
@@ -218,7 +225,7 @@ jobs:
           kops_state: ${{ secrets.GCP_PERF_KOPS_STATE_STORE }}
 
       - name: Export results and sysdump to GS bucket
-        if: ${{ always() && steps.run-cl2.outcome != 'skipped' }}
+        if: ${{ always() && (steps.run-cl2.outcome != 'skipped' || steps.run-net-qos.outcome != 'skipped') }}
         uses: cilium/scale-tests-action/export-results@d3ecfd83003f3e9c98ba125ca14933401d44918f # main
         with:
           test_name: ${{ env.test_name }}
