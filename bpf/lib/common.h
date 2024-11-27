@@ -1030,7 +1030,7 @@ struct lb6_service {
      * 1 - random
      * 2 - maglev
      */
-    __u8 lb_alg;
+    __u8 lb_algorithm;
     __u8 pad[3];
 #endif
 };
@@ -1102,7 +1102,7 @@ struct lb4_service {
      * 1 - random
      * 2 - maglev
      */
-    __u8 lb_alg;
+    __u8 lb_algorithm;
     __u8 pad[3];
 #endif
 };
